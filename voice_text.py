@@ -11,6 +11,7 @@ import librosa
 
 from smolagents import CodeAgent, LiteLLMModel
 from piper import PiperVoice
+# from transformers import pipeline
 
 import traceback
 
@@ -27,6 +28,7 @@ MODEL_TYPE = "base.en"  # Can be tiny.en, base.en, small.en, medium.en, large-v2
 # --- VAD Configuration ---
 ENERGY_THRESHOLD = 0.1
 SILENCE_DURATION = 2
+CONVO_END_DURATION = 10
 CHUNK_DURATION = 0.2
 # =================================================================================
 
@@ -39,9 +41,9 @@ model_llm = LiteLLMModel(
     api_base="http://localhost:11434",
 )
 # code agent framework from smolagents
+chat_history = []
 agent = CodeAgent(tools=[], add_base_tools=True, model=model_llm, stream_outputs=True)
 
-chat_history = []
 voice = PiperVoice.load("./en_US-kusal-medium.onnx")
 
 # wake up porcupine
@@ -50,6 +52,9 @@ porcupine = pvporcupine.create(
     keyword_paths=["./hey-jarvis_en_linux_v3_0_0/hey-jarvis_en_linux_v3_0_0.ppn"],
 )
 
+# print("Loading zero-shot classification model...")
+# classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+# print("Classifier loaded.")
 
 def audio_callback(indata, frames, time, status):
     if status:
@@ -59,7 +64,31 @@ def audio_callback(indata, frames, time, status):
     )
     audio_queue.put(resampled_chunk)
 
+# def get_intent(text: str) -> str:
+#     """
+#     Classifies intent using a fast, specialized zero-shot model.
+#     """
+#     print("Classifying intent (zero-shot)...")
 
+#     # Use more descriptive labels for better accuracy
+#     candidate_labels = ["conversation", "computer task"]
+
+#     try:
+#         # The model returns scores for each label
+#         result = classifier(text, candidate_labels)
+
+#         # The label with the highest score is our intent
+#         top_label = result['labels'][0]
+#         print(f"Top label: '{top_label}' with score {result['scores'][0]:.2f}")
+
+#         if top_label == "computer task":
+#             return "task"
+#         return "chat"
+
+#     except Exception as e:
+#         print("getting intent failed ", e)
+#         print(traceback.format_exc())
+#         return "task"
 def get_intent(text: str) -> str:
     print("Classifying intent...")
     try:
@@ -111,7 +140,7 @@ def get_intent(text: str) -> str:
     except Exception as e:
         print(traceback.format_exc())
         print(
-            f"[bold red]Intent classification failed: {e}. Defaulting to 'task'.[/bold red]"
+            f"Intent classification failed: {e}. Defaulting to 'task'."
         )
         return "task"
 
@@ -136,6 +165,7 @@ def process_audio_for_transcription(audio_frames, model):
         if intent == "task":
             full_response = str(agent.run(transcribed_text))
         else:
+            # TODO: merge the two memories from normal chat and the agent run
             current_chat = {
                 "role": "user",
                 "content": [{"type": "text", "text": transcribed_text}],
@@ -180,7 +210,9 @@ def process_voice(model):
         chunk_frames_device = int(CHUNK_DURATION * DEVICE_SAMPLE_RATE)
         phrase_audio = []
         silence_chunks = 0
+        convo_end_chunks = 0
         max_silence_chunks = int(SILENCE_DURATION / CHUNK_DURATION)
+        max_convo_end_chunks = int(CONVO_END_DURATION / CHUNK_DURATION)
         is_speaking = False
 
         with audio_queue.mutex:
@@ -199,6 +231,10 @@ def process_voice(model):
                     continue
                 audio_chunk = audio_queue.get()
                 rms = np.sqrt(np.mean(audio_chunk**2))
+                if rms < ENERGY_THRESHOLD:
+                    convo_end_chunks += 1
+                    if convo_end_chunks > max_convo_end_chunks:
+                        break
                 if is_speaking:
                     phrase_audio.append(audio_chunk)
                     if rms < ENERGY_THRESHOLD:
@@ -217,6 +253,7 @@ def process_voice(model):
                     print("▶️  Speech detected...")
                     is_speaking = True
                     silence_chunks = 0
+                    convo_end_chunks = 0
                     phrase_audio.append(audio_chunk)
     except Exception as e:
         print(e)
