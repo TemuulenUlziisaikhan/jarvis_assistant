@@ -9,9 +9,11 @@ import queue
 import threading
 import librosa
 
-from smolagents import CodeAgent, LiteLLMModel
+from smolagents import CodeAgent, LiteLLMModel, tool
 from piper import PiperVoice
 # from transformers import pipeline
+import smtplib
+from email.mime.text import MIMEText
 
 import traceback
 
@@ -40,9 +42,46 @@ model_llm = LiteLLMModel(
     model_id="ollama_chat/gemma3",
     api_base="http://localhost:11434",
 )
+
+
+@tool
+def send_markdown_email(content: str, to_email: str, subject: str = "AI Tooling Briefing") -> str:
+    """Sends an email with markdown content using credentials from environment variables.
+
+    Args:
+        content (str): The markdown-formatted content of the email body.
+        to_email (str): The recipient's email address.
+        subject (str): The subject line of the email.
+    """
+    # Load credentials securely from environment variables
+    smtp_server = os.getenv("SMTP_SERVER")
+    smtp_port = int(os.getenv("SMTP_PORT", 587))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+
+    if not all([smtp_server, smtp_user, smtp_password]):
+        return "Error: SMTP environment variables not set. Please set SMTP_SERVER, SMTP_USER, and SMTP_PASSWORD."
+
+    # Prepare and send the email
+    msg = MIMEText(content, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = smtp_user
+    msg["To"] = to_email
+
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_user, [to_email], msg.as_string())
+        return f"Email sent successfully to {to_email}."
+    except Exception as e:
+        return f"Failed to send email: {e}"
+
+
+
 # code agent framework from smolagents
 chat_history = []
-agent = CodeAgent(tools=[], add_base_tools=True, model=model_llm, stream_outputs=True)
+agent = CodeAgent(tools=[send_markdown_email], add_base_tools=True, model=model_llm, stream_outputs=True)
 
 voice = PiperVoice.load("./en_US-kusal-medium.onnx")
 
